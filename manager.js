@@ -224,7 +224,7 @@ function main() {
             
             // 모든 봇이 완전히 켜진 후 5초 뒤에 최초 명령 하달
             setTimeout(() => {
-                console.log("\n[메니저] 📢 모든 개별 봇 파일(프로세스)에 일제히 '.나무캐' 명령어 하달!");
+                console.log("\n[메니저] 모든 개별 봇 파일(프로세스)에 일제히 '.나무캐' 명령어 하달!");
                 runningProcesses.forEach((child, index) => {
                     if (child.connected) {
                         child.send("mine_logs");
