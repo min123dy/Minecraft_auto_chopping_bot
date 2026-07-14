@@ -46,7 +46,7 @@
 리포지토리를 클론하거나 코드를 다운로드합니다.
 
 ```bash
-git clone https://github.com/your-username/Minecraft_auto_chopping_bot.git
+git clone https://github.com/min123dy/Minecraft_auto_chopping_bot.git
 cd Minecraft_auto_chopping_bot
 ```
 
