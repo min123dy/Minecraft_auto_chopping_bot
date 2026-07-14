@@ -6,7 +6,7 @@ const config = require("./config");
 
 const runningProcesses = [];
 
-// 🤖 개별 봇 파일에 주입될 독립형 소스코드 템플릿 스트링
+// 개별 봇 파일에 주입될 독립형 소스코드 템플릿 스트링
 function generateBotTemplate(botName, botIndex) {
     return `const mineflayer = require("mineflayer");
 const { pathfinder, Movements, goals } = require("mineflayer-pathfinder");
@@ -40,7 +40,7 @@ process.on("unhandledRejection", (err) => {
 
 bot.loadPlugin(pathfinder);
 
-// 🦘 [강제 점프 시스템] 다른 모든 동작/컨트롤과 무관하게 특정 주기마다 무조건 점프 시도
+// [강제 점프 시스템] 다른 모든 동작/컨트롤과 무관하게 특정 주기마다 무조건 점프 시도
 setInterval(() => {
     // 봇이 존재하고, 땅에 딛고 있을 때만 점프 수행 (공중 부양 방지)
     if (!bot.entity || !bot.entity.onGround) return;
@@ -58,7 +58,7 @@ setInterval(() => {
     
     // 패스파인더 플러그인이 로드된 후에 등록되므로, 패스파인더 신호를 뒤에서 무조건 덮어씁니다.
     bot.on("physicsTick", forceJumpListener);
-}, 4000); // ⏱️ 4000ms = 4초 주기 (원하는 초 단위 주기로 이 숫자를 변경하시면 됩니다)
+}, 4000); // 4000ms = 4초 주기 (원하는 초 단위 주기로 이 숫자를 변경하시면 됩니다)
 
 
 let isMiningActive = false;
@@ -86,14 +86,14 @@ function startMiningLoop(blockNames) {
     defaultMove.canPlaceOn = true;
     defaultMove.scaffoldingBlocks = ['dirt', 'cobblestone', 'stone'];
     
-    // 🐢 [속도 제어] 달리기를 원천 차단하고 오직 걷기만 수행
+    // [속도 제어] 달리기를 원천 차단하고 오직 걷기만 수행
     defaultMove.allowSprinting = false; 
     
     bot.pathfinder.setMovements(defaultMove);
     bot.pathfinder.thinkTimeout = 1000;
     bot.pathfinder.maxPathCount = 2000;
 
-    // 🐢 [속도 제어] 물리 엔진의 기본 걷기 속도(0.1)를 0.06으로 하향하여 일반 플레이어보다 느리게 이동
+    // [속도 제어] 물리 엔진의 기본 걷기 속도(0.1)를 0.06으로 하향하여 일반 플레이어보다 느리게 이동
     bot.physics.walkingSpeed = 0.06;
 
     currentBlockNames = blockNames;
@@ -211,13 +211,13 @@ bot.on("end", () => { console.log(\`[\${bot.username}] 연결 종료\`); });
 `;
 }
 
-// 🚀 메인 메니저 프로세스 기동
+// 메인 메니저 프로세스 기동
 function main() {
     console.log(`[메니저] 총 ${config.BOT_COUNT}개의 개별 JS 파일을 생성하고 병렬 구동합니다.`);
 
     let currentBotIndex = 1;
 
-    // ⏱️ 500ms 시간차를 두고 순차적으로 프로세스를 실행하여 접속 과부하 방지
+    // 500ms 시간차를 두고 순차적으로 프로세스를 실행하여 접속 과부하 방지
     function spawnNextBot() {
         if (currentBotIndex > config.BOT_COUNT) {
             console.log(`[메니저] 모든 봇 (${config.BOT_COUNT}개) 파일 생성 및 독립 프로세스 가동 성공.`);
