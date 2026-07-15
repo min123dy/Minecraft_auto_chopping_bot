@@ -6,7 +6,6 @@ const config = require("./config");
 
 const runningProcesses = [];
 
-// 개별 봇 파일에 주입될 독립형 소스코드 템플릿 스트링
 function generateBotTemplate(botName, botIndex) {
     return `const mineflayer = require("mineflayer");
 const { pathfinder, Movements, goals } = require("mineflayer-pathfinder");
@@ -25,7 +24,7 @@ const bot = mineflayer.createBot({
     username: "${botName}",
     version: config.MINECRAFT_VERSION,
     connectTimeout: 8000,
-    viewDistance: "tiny"
+    viewDistance: "short"
 });
 
 process.on("uncaughtException", (err) => {
@@ -40,32 +39,52 @@ process.on("unhandledRejection", (err) => {
 
 bot.loadPlugin(pathfinder);
 
-// [강제 점프 시스템] 다른 모든 동작/컨트롤과 무관하게 특정 주기마다 무조건 점프 시도
-setInterval(() => {
-    // 봇이 존재하고, 땅에 딛고 있을 때만 점프 수행 (공중 부양 방지)
-    if (!bot.entity || !bot.entity.onGround) return;
-    
-    let tickCount = 0;
-    const forceJumpListener = () => {
-        bot.setControlState("jump", true);
-        tickCount++;
-        
-        // 2틱(약 0.1초) 동안 강제로 누른 뒤 해제 (서버 패킷에 완벽히 인지되도록 보장)
-        if (tickCount >= 2) {
-            bot.removeListener("physicsTick", forceJumpListener);
-        }
-    };
-    
-    // 패스파인더 플러그인이 로드된 후에 등록되므로, 패스파인더 신호를 뒤에서 무조건 덮어씁니다.
-    bot.on("physicsTick", forceJumpListener);
-}, 4000); // 4000ms = 4초 주기 (원하는 초 단위 주기로 이 숫자를 변경하시면 됩니다)
-
-
 let isMiningActive = false;
 let isBusy = false;
 let currentTargetBlock = null;
 let currentBlockNames = [];
 const unreachableBlocks = new Set();
+
+// [탐색 범위 확장 시스템]
+const BASE_SEARCH_RADIUS = 32;
+const MAX_SEARCH_RADIUS = 64;
+const SEARCH_RADIUS_STEP = 16;
+let currentSearchRadius = BASE_SEARCH_RADIUS;
+let hasRetriedAtCurrentRadius = false; // 현재 범위에서 블랙리스트 초기화 후 재시도했는지 여부
+let isExploring = false;
+
+// [위치 기반 워치독 시스템]
+let lastCheckPosition = null;
+
+// 7초마다 실행하여 실제 이동 거리가 사실상 0 (0.00m)일 때만 강제 리셋
+setInterval(() => {
+    if (!isMiningActive || !bot.entity || isExploring) {
+        lastCheckPosition = null;
+        return;
+    }
+
+    const currentPos = bot.entity.position;
+
+    if (lastCheckPosition) {
+        const distanceMoved = currentPos.distanceTo(lastCheckPosition);
+
+        // 이동 거리가 0.01m 미만(소수점 둘째 자리 반올림 기준 0.00m)일 때만 스턱으로 간주
+        if (distanceMoved < 0.01) {
+            console.log(\`[\${bot.username}] 7초 동안 완전히 멈춤 감지 (이동 거리: \${distanceMoved.toFixed(2)}m). 작업을 강제 초기화하고 재시작합니다.\`);
+
+            stopEverything();
+            lastCheckPosition = null; // 체크 위치 초기화
+
+            setTimeout(() => {
+                startMiningLoop(currentBlockNames);
+            }, 1000);
+            return;
+        }
+    }
+
+    // 현재 위치 복사하여 저장 (다음 7초 후에 비교)
+    lastCheckPosition = currentPos.clone();
+}, 7000); // 7초 주기
 
 process.on("message", (command) => {
     if (command === "stop") {
@@ -80,20 +99,20 @@ process.on("message", (command) => {
 function startMiningLoop(blockNames) {
     if (isMiningActive) return;
     isMiningActive = true;
+    lastCheckPosition = null; // 루프 시작 시 위치 기록 리셋
+    currentSearchRadius = BASE_SEARCH_RADIUS; // 탐색 범위 초기화
+    hasRetriedAtCurrentRadius = false;
 
     const defaultMove = new Movements(bot);
     defaultMove.canDig = true;
     defaultMove.canPlaceOn = true;
     defaultMove.scaffoldingBlocks = ['dirt', 'cobblestone', 'stone'];
     
-    // [속도 제어] 달리기를 원천 차단하고 오직 걷기만 수행
     defaultMove.allowSprinting = false; 
     
     bot.pathfinder.setMovements(defaultMove);
     bot.pathfinder.thinkTimeout = 1000;
     bot.pathfinder.maxPathCount = 2000;
-
-    // [속도 제어] 물리 엔진의 기본 걷기 속도(0.1)를 0.06으로 하향하여 일반 플레이어보다 느리게 이동
     bot.physics.walkingSpeed = 0.06;
 
     currentBlockNames = blockNames;
@@ -107,11 +126,12 @@ async function runMiningTask() {
     try {
         if (!currentTargetBlock || currentTargetBlock.type === 0 || unreachableBlocks.has(currentTargetBlock.position.toString())) {
             const targetIds = currentBlockNames.map(name => bot.registry.blocksByName[name]?.id).filter(Boolean);
-            const matchingBlocks = bot.findBlocks({ matching: targetIds, maxDistance: 32, count: 40 });
+            const matchingBlocks = bot.findBlocks({ matching: targetIds, maxDistance: currentSearchRadius, count: 40 });
+
+            let selectedBlock = null;
 
             if (matchingBlocks.length > 0) {
                 let startIndex = privateApi.id % matchingBlocks.length;
-                let selectedBlock = null;
 
                 for (let i = 0; i < matchingBlocks.length; i++) {
                     const checkIndex = (startIndex + i) % matchingBlocks.length;
@@ -122,15 +142,44 @@ async function runMiningTask() {
                         break;
                     }
                 }
-                currentTargetBlock = selectedBlock;
+            }
+
+            currentTargetBlock = selectedBlock;
+
+            if (currentTargetBlock) {
+                // 유효한 타겟을 찾았으니 다음 탐색을 위해 범위와 재시도 플래그를 초기화
+                currentSearchRadius = BASE_SEARCH_RADIUS;
+                hasRetriedAtCurrentRadius = false;
             }
         }
 
         if (!currentTargetBlock) {
-            unreachableBlocks.clear();
-            // 주변에 블록이 없을 때 다시 탐색할 때까지의 대기 시간 (1.5초)
-            setTimeout(() => { isBusy = false; runMiningTask(); }, 1500);
-            return;
+            if (!hasRetriedAtCurrentRadius) {
+                // 범위를 넓히기 전에, 현재 범위에서 블랙리스트를 초기화하고 한 번 더 시도
+                hasRetriedAtCurrentRadius = true;
+                console.log(\`[\${bot.username}] \${currentSearchRadius}블럭 내 유효 대상 없음. 블랙리스트 초기화 후 같은 범위에서 재시도합니다.\`);
+                unreachableBlocks.clear();
+                isBusy = false;
+                setTimeout(() => { runMiningTask(); }, 1500);
+                return;
+            }
+
+            if (currentSearchRadius < MAX_SEARCH_RADIUS) {
+                // 블랙리스트를 초기화해도 대상이 없다면 탐색 범위를 확장
+                const previousRadius = currentSearchRadius;
+                currentSearchRadius = Math.min(currentSearchRadius + SEARCH_RADIUS_STEP, MAX_SEARCH_RADIUS);
+                hasRetriedAtCurrentRadius = false; // 새 범위에서는 재시도 플래그 초기화
+                console.log(\`[\${bot.username}] \${previousRadius}블럭 내 채굴 대상 없음. 탐색 범위를 \${currentSearchRadius}블럭으로 확장합니다.\`);
+                unreachableBlocks.clear();
+                isBusy = false;
+                setTimeout(() => { runMiningTask(); }, 1500);
+                return;
+            } else {
+                // 최대 범위(64블럭)까지도 대상이 없으면 랜덤 방향으로 탐험 이동
+                isBusy = false;
+                exploreForNewArea();
+                return;
+            }
         }
 
         const distance = bot.entity.position.distanceTo(currentTargetBlock.position);
@@ -138,9 +187,7 @@ async function runMiningTask() {
         async function gotoWithTimeout(goal, ms = 5000) {
             return Promise.race([
                 bot.pathfinder.goto(goal),
-                new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error("Goto timeout")), ms)
-                )
+                new Promise((_, reject) => setTimeout(() => reject(new Error("Goto timeout")), ms))
             ]);
         }
 
@@ -148,8 +195,6 @@ async function runMiningTask() {
             const goal = new GoalLookAtBlock(currentTargetBlock.position, bot.world);
             await gotoWithTimeout(goal);
             isBusy = false;
-            
-            // 목적지 도달 후 행동 개시 전 숨 고르기 대기 시간 (1초)
             setTimeout(() => runMiningTask(), 1000);
         } else {
             if (bot.game.gameMode === "survival") {
@@ -160,9 +205,7 @@ async function runMiningTask() {
             async function lookWithTimeout(pos, ms = 3000) {
                 return Promise.race([
                     bot.lookAt(pos),
-                    new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error("Look timeout")), ms)
-                    )
+                    new Promise((_, reject) => setTimeout(() => reject(new Error("Look timeout")), ms))
                 ]);
             }
 
@@ -171,17 +214,13 @@ async function runMiningTask() {
             async function digWithTimeout(block, ms = 5000) {
                 return Promise.race([
                     bot.dig(block, true),
-                    new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error("Dig timeout")), ms)
-                    )
+                    new Promise((_, reject) => setTimeout(() => reject(new Error("Dig timeout")), ms))
                 ]);
             }
             await digWithTimeout(currentTargetBlock);
             
             currentTargetBlock = null;
             isBusy = false;
-            
-            // 블록 채굴 후 다음 타깃 서칭 전 휴식 대기 시간 (1.2초)
             setTimeout(() => runMiningTask(), 1200);
         }
     } catch (err) {
@@ -195,10 +234,49 @@ async function runMiningTask() {
     }
 }
 
+// [탐험 이동] 64블럭 내에도 채굴 대상이 없을 때, 랜덤 방향을 보고
+// 점프하며 앞으로 걸어가 새로운 구역을 확보한 뒤 다시 탐색을 시작한다.
+function exploreForNewArea() {
+    if (isExploring || !isMiningActive) return;
+    isExploring = true;
+
+    const randomYaw = (Math.random() * Math.PI * 2) - Math.PI; // -PI ~ PI
+    console.log(\`[\${bot.username}] \${MAX_SEARCH_RADIUS}블럭 내 채굴 대상 없음. 랜덤 방향(\${randomYaw.toFixed(2)}rad)으로 탐험 이동을 시작합니다.\`);
+
+    try {
+        bot.look(randomYaw, 0, true);
+    } catch (err) {
+        console.error(\`[\${bot.username}] 탐험 방향 설정 실패\`, err);
+    }
+
+    bot.setControlState("forward", true);
+    bot.setControlState("jump", true);
+    bot.setControlState("sprint", false);
+
+    const EXPLORE_DURATION_MS = 10000;
+
+    setTimeout(() => {
+        bot.setControlState("forward", false);
+        bot.setControlState("jump", false);
+
+        isExploring = false;
+        currentSearchRadius = BASE_SEARCH_RADIUS; // 새 위치 기준으로 다시 32블럭부터 탐색
+        hasRetriedAtCurrentRadius = false;
+        unreachableBlocks.clear();
+
+        if (isMiningActive) {
+            runMiningTask();
+        }
+    }, EXPLORE_DURATION_MS);
+}
+
 function stopEverything() {
     isMiningActive = false;
     isBusy = false;
+    isExploring = false;
     currentTargetBlock = null;
+    currentSearchRadius = BASE_SEARCH_RADIUS;
+    hasRetriedAtCurrentRadius = false;
     unreachableBlocks.clear();
     bot.clearControlStates();
     bot.pathfinder.stop();
@@ -211,26 +289,17 @@ bot.on("end", () => { console.log(\`[\${bot.username}] 연결 종료\`); });
 `;
 }
 
-// 메인 메니저 프로세스 기동
 function main() {
     console.log(`[메니저] 총 ${config.BOT_COUNT}개의 개별 JS 파일을 생성하고 병렬 구동합니다.`);
-
     let currentBotIndex = 1;
 
-    // 500ms 시간차를 두고 순차적으로 프로세스를 실행하여 접속 과부하 방지
     function spawnNextBot() {
         if (currentBotIndex > config.BOT_COUNT) {
             console.log(`[메니저] 모든 봇 (${config.BOT_COUNT}개) 파일 생성 및 독립 프로세스 가동 성공.`);
-            
-            // 모든 봇이 완전히 켜진 후 5초 뒤에 최초 명령 하달
             setTimeout(() => {
-                console.log("\n[메니저] 모든 개별 봇 파일(프로세스)에 일제히 '.나무캐' 명령어 하달!");
-                runningProcesses.forEach((child, index) => {
-                    if (child.connected) {
-                        child.send("mine_logs");
-                    } else {
-                        console.error(`[메니저 에러] Bot_${index + 1}의 IPC 채널이 닫혀 있어 명령을 전달하지 못했습니다.`);
-                    }
+                console.log("\n[메니저] 모든 개별 봇 프로세스에 명령 하달!");
+                runningProcesses.forEach((child) => {
+                    if (child.connected) child.send("mine_logs");
                 });
             }, 5000);
             return;
@@ -239,36 +308,21 @@ function main() {
         const botName = `Bot_${currentBotIndex}`;
         const fileName = `bot_agent${currentBotIndex}.js`;
         const filePath = path.join(__dirname, fileName);
-
-        // 1. 파일 자동 생성 및 고유 값 주입
         const scriptContent = generateBotTemplate(botName, currentBotIndex);
+        
         fs.writeFileSync(filePath, scriptContent, "utf8");
-
-        // 2. 독립 프로세스로 실행
         const child = fork(filePath);
         
-        child.on("exit", (code, signal) => {
-            console.log(`[메니저 경고] ${botName} 프로세스가 종료되었습니다. 코드: ${code}, 시그널: ${signal}`);
+        child.on("exit", (code) => {
+            console.log(`[메니저 경고] ${botName} 프로세스 종료 (코드: ${code})`);
         });
 
         runningProcesses.push(child);
-        console.log(`[메니저] ${botName} 프로세스 구동 시작... (다음 봇 구동까지 500ms 대기)`);
-
         currentBotIndex++;
         setTimeout(spawnNextBot, 500);
     }
-
-    // 첫 번째 봇 실행 개시
     spawnNextBot();
 }
 
-// 종료 리스너 등록
-process.on("exit", () => {
-    runningProcesses.forEach(child => child.kill());
-});
-process.on("SIGINT", () => {
-    process.exit();
-});
-
-// 실행
+process.on("exit", () => { runningProcesses.forEach(child => child.kill()); });
 main();
